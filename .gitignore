@@ -1,0 +1,12 @@
+# Dépôts externes clonés localement (datasets tiers volumineux, à recloner
+# soi-même — voir README.md "Récupérer les datasets sources complets")
+mathdial-source/
+socraticlm-source/
+
+# Sorties générées par les scripts (à ne pas versionner : contiennent des
+# dialogues produits par l'API, à régénérer à volonté)
+*.jsonl
+!exemples.jsonl
+
+__pycache__/
+*.pyc
