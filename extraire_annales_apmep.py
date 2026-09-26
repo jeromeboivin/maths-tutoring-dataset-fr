@@ -88,15 +88,55 @@ def extraire_texte_pdf(chemin: Path) -> str:
     return "\n".join(morceaux)
 
 
+COMMANDES_MISE_EN_PAGE = (r"\needspace", r"\vspace", r"\hspace", r"\addvspace")
+
+
+def retirer_commandes_mise_en_page(texte: str) -> str:
+    """Retire des commandes comme \\needspace{10\\baselineskip} ou
+    \\vspace{8pt}, avec leur argument entre accolades (gestion des accolades
+    imbriquées). Indispensable avant de chercher "le dernier nombre du
+    texte" : sans ça, le "10" de \\needspace{10\\baselineskip} — une commande
+    de mise en page qui précède presque chaque exercice dans les fichiers
+    APMEP pour éviter une coupure de page — était pris à tort pour la
+    réponse de l'exercice PRÉCÉDENT (repéré par un vrai cas : trois exercices
+    de suite renvoyaient "10" au lieu de leur vraie réponse)."""
+    for commande in COMMANDES_MISE_EN_PAGE:
+        motif = re.compile(re.escape(commande) + r"\*?\s*\{")
+        while True:
+            m = motif.search(texte)
+            if not m:
+                break
+            profondeur = 1
+            i = m.end()
+            while i < len(texte) and profondeur > 0:
+                if texte[i] == "{":
+                    profondeur += 1
+                elif texte[i] == "}":
+                    profondeur -= 1
+                i += 1
+            texte = texte[:m.start()] + texte[i:]
+    return texte
+
+
+def retirer_commentaires_latex(texte: str) -> str:
+    """Retire tout ce qui suit un % non échappé sur chaque ligne (commentaire
+    LaTeX), qu'il occupe la ligne entière ou seulement sa fin. Un vrai
+    pourcentage s'écrit \\% (backslash devant) et n'est donc PAS retiré (la
+    négation "non précédé d'un backslash" protège ce cas). Indispensable :
+    un corrigé réel contenait "...\\np[~g]{59}. %arrondir à l'entier car 65..."
+    — sans retirer ce commentaire de fin de ligne, le "65" qu'il contient
+    aurait été pris à tort pour la réponse finale (59 était la vraie)."""
+    return "\n".join(re.sub(r"(?<!\\)%.*$", "", ligne) for ligne in texte.splitlines())
+
+
 def extraire_texte_tex(chemin: Path) -> str:
-    """Lit un fichier .tex et retire les lignes entièrement commentées
-    (lignes dont le premier caractère non blanc est %) : l'APMEP en truffe
-    ses sources de versions alternatives commentées (par ex. un dessin TikZ
-    laissé en commentaire à côté du PSTricks réellement utilisé), qui ne sont
-    que du bruit pour la suite du traitement."""
+    """Lit un fichier .tex, retire tous les commentaires LaTeX (l'APMEP en
+    truffe ses sources — par ex. un dessin TikZ laissé en commentaire à côté
+    du PSTricks réellement utilisé — qui ne sont que du bruit pour la suite
+    du traitement), puis retire les commandes de mise en page qui pourraient
+    fausser la recherche de la réponse finale."""
     texte = chemin.read_text(encoding="utf-8")
-    lignes_utiles = [l for l in texte.splitlines() if not l.lstrip().startswith("%")]
-    return "\n".join(lignes_utiles)
+    return retirer_commandes_mise_en_page(retirer_commentaires_latex(texte))
 
 
 def extraire_texte_fichier(chemin: Path) -> str:
@@ -162,18 +202,22 @@ def extraire_arguments_commande(texte: str, commande: str) -> list:
 
 def extraire_reponse_courte(texte_corrige_exercice: str) -> str:
     """Voir la documentation en tête de fichier pour l'ordre de préférence
-    (\\fbox, puis "= nombre", puis dernier nombre, puis dernière phrase).
-    Renvoie une chaîne courte plutôt qu'une phrase entière avec ses calculs
-    intermédiaires : sinon le contrôle qualité de generate_from_annales.py
-    exigerait à tort que TOUS les nombres intermédiaires de cette phrase
-    réapparaissent dans la conclusion du dialogue généré."""
+    (\\fbox, puis dernier nombre du texte, puis dernière phrase). Renvoie une
+    chaîne courte plutôt qu'une phrase entière avec ses calculs intermédiaires :
+    sinon le contrôle qualité de generate_from_annales.py exigerait à tort que
+    TOUS les nombres intermédiaires de cette phrase réapparaissent dans la
+    conclusion du dialogue généré.
+
+    Remarque sur le choix du "dernier nombre du texte" plutôt que du "dernier
+    nombre juste après un signe =" : une conclusion du type "la masse d'une
+    boule est d'environ \\np[~g]{59}" arrondit un résultat intermédiaire
+    ($0,9\\times 65=58,5$) SANS "=" devant la valeur arrondie retenue — chercher
+    spécifiquement après un "=" aurait donc à tort renvoyé 58,5 au lieu de 59,
+    la vraie réponse officielle."""
     boites = extraire_arguments_commande(texte_corrige_exercice, r"\fbox")
     if boites:
         return boites[-1].strip()
 
-    matches_egal = list(re.finditer(r"=\s*(" + MOTIF_NOMBRE + r")", texte_corrige_exercice))
-    if matches_egal:
-        return matches_egal[-1].group(1)
     matches_nombre = list(re.finditer(MOTIF_NOMBRE, texte_corrige_exercice))
     if matches_nombre:
         return matches_nombre[-1].group(0)
