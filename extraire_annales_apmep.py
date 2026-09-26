@@ -6,8 +6,8 @@ extraire_annales_apmep.py
 
 Construit un fichier "seed" (même esprit que seed_problems.csv) à partir de
 vraies annales du Brevet des collèges publiées par l'APMEP
-(https://www.apmep.fr/Annales-du-Brevet-des-colleges), en PDF, sujet et
-corrigé étant deux fichiers séparés.
+(https://www.apmep.fr/Annales-du-Brevet-des-colleges), sujet et corrigé étant
+deux fichiers séparés, en PDF **ou en LaTeX (.tex)**.
 
 POURQUOI CE SCRIPT EXISTE : l'objectif de Jérôme est un dataset dont les
 réponses ne contiennent AUCUNE hallucination. La réponse correcte de chaque
@@ -17,37 +17,51 @@ conservé (colonne "corrige_officiel") pour servir de texte de référence
 ("grounding") au modèle qui rédigera ensuite le dialogue pédagogique, dans
 generate_from_annales.py.
 
+POURQUOI .TEX PLUTÔT QUE PDF QUAND C'EST POSSIBLE : le texte extrait d'un PDF
+est souvent abîmé (colonnes mal remises dans l'ordre, formules éclatées). Le
+LaTeX source, lui, est fiable et les formules restent intactes. Ce script
+préfère donc le `.tex` quand il est disponible, et garde le PDF en repli pour
+les années où seul le PDF existe. ATTENTION : les fichiers `.tex` de l'APMEP
+sont tapuscrits par des bénévoles différents selon les années/académies, et
+leurs conventions de mise en forme varient (voir plus bas pour le détail des
+heuristiques et leurs limites).
+
 CONTRAINTE RÉSEAU : ce script tourne dans un environnement qui n'a pas accès
 à apmep.fr (site bloqué en sortie réseau ici, et son robots.txt renvoyait une
 erreur 503 au moment où ce script a été écrit). Il faut donc TÉLÉCHARGER les
-PDF toi-même (depuis un navigateur normal, ça fonctionne) et les déposer dans
-un dossier, avec une convention de nom simple pour que le script puisse
+fichiers toi-même (depuis un navigateur normal, ça fonctionne) et les déposer
+dans un dossier, avec une convention de nom simple pour que le script puisse
 associer chaque sujet à son corrigé sans ambiguïté :
 
-    <identifiant_session>__sujet.pdf
-    <identifiant_session>__corrige.pdf
+    <identifiant_session>__sujet.tex   (ou .pdf)
+    <identifiant_session>__corrige.tex (ou .pdf)
 
 Exemple :
-    annales-source/2024-07-metropole__sujet.pdf
-    annales-source/2024-07-metropole__corrige.pdf
-    annales-source/2024-09-antilles__sujet.pdf
-    annales-source/2024-09-antilles__corrige.pdf
+    annales-source/2026-06-amerique-nord__sujet.tex
+    annales-source/2026-06-amerique-nord__corrige.tex
 
 (les noms de fichiers d'origine sur apmep.fr ne suivent pas une convention
-assez régulière pour être associés automatiquement de façon fiable — voir le
-message envoyé à l'utilisateur pour des liens de départ)
+assez régulière pour être associés automatiquement de façon fiable)
 
-LIMITE IMPORTANTE (contrôle qualité) : pour un exercice à plusieurs
-sous-questions, la "réponse correcte" retenue automatiquement est une
-heuristique (les 2 dernières phrases du corrigé de l'exercice) : elle peut ne
-capturer que la conclusion de la DERNIÈRE sous-question, pas toutes. Ce n'est
-pas un problème pour le contrôle qualité automatique de generate_from_annales.py
-(qui vérifie que cette conclusion précise apparaît bien dans le dialogue final),
-mais une relecture humaine reste recommandée, en particulier sur les exercices
-à tiroirs (plusieurs questions indépendantes).
+COMMENT LA RÉPONSE CORRECTE EST EXTRAITE (par ordre de préférence) :
+1. Le dernier `\\fbox{...}` du corrigé de l'exercice, s'il y en a un — les
+   correcteurs qui utilisent \\fbox l'utilisent presque toujours pour encadrer
+   LA réponse à retenir, donc c'est le signal le plus fiable quand il existe.
+2. À défaut (certains correcteurs ne l'utilisent jamais, et mettent la
+   réponse en \\textbf{...} ou en texte simple) : le dernier "= <nombre>" du
+   corrigé, puis à défaut le dernier nombre du texte, puis en tout dernier
+   recours la dernière phrase telle quelle.
+
+LIMITES IMPORTANTES (contrôle qualité) :
+- Sur un exercice à plusieurs sous-questions indépendantes, cette réponse
+  extraite ne couvre en général que la conclusion de la DERNIÈRE
+  sous-question — les autres ne sont pas vérifiées automatiquement.
+- Les conventions de mise en forme changent d'un tapuscripteur à l'autre :
+  ce script vise à être robuste aux variantes vues jusqu'ici, mais une
+  relecture humaine d'un échantillon reste recommandée, surtout au début.
 
 Installation :
-    pip install pdfplumber
+    pip install pdfplumber   (uniquement nécessaire si tu fournis des .pdf)
 
 Utilisation :
     python3 extraire_annales_apmep.py --source annales-source --out annales_apmep.csv
@@ -61,10 +75,10 @@ from pathlib import Path
 
 
 # ---------------------------------------------------------------------------
-# 1. Extraction du texte des PDF
+# 1. Extraction du texte source (PDF ou LaTeX)
 # ---------------------------------------------------------------------------
 
-def extraire_texte_pdf(chemin) -> str:
+def extraire_texte_pdf(chemin: Path) -> str:
     import pdfplumber
 
     morceaux = []
@@ -74,17 +88,40 @@ def extraire_texte_pdf(chemin) -> str:
     return "\n".join(morceaux)
 
 
+def extraire_texte_tex(chemin: Path) -> str:
+    """Lit un fichier .tex et retire les lignes entièrement commentées
+    (lignes dont le premier caractère non blanc est %) : l'APMEP en truffe
+    ses sources de versions alternatives commentées (par ex. un dessin TikZ
+    laissé en commentaire à côté du PSTricks réellement utilisé), qui ne sont
+    que du bruit pour la suite du traitement."""
+    texte = chemin.read_text(encoding="utf-8")
+    lignes_utiles = [l for l in texte.splitlines() if not l.lstrip().startswith("%")]
+    return "\n".join(lignes_utiles)
+
+
+def extraire_texte_fichier(chemin: Path) -> str:
+    if chemin.suffix.lower() == ".pdf":
+        return extraire_texte_pdf(chemin)
+    if chemin.suffix.lower() == ".tex":
+        return extraire_texte_tex(chemin)
+    raise ValueError(f"Extension non supportée : {chemin}")
+
+
 # ---------------------------------------------------------------------------
 # 2. Découpage en exercices
 # ---------------------------------------------------------------------------
 
+# Fonctionne à la fois sur du texte extrait d'un PDF et sur du LaTeX source :
+# dans les deux cas, "Exercice" est presque toujours suivi directement du
+# numéro (peu importe la commande qui l'entoure : \subsection*{Exercice 1...},
+# \section*{Exercice 1 (3 points)}, \textbf{\textsc{Exercice 1} \hfill...}).
 MOTIF_EXERCICE = re.compile(r"Exercice\s+(\d+)\b", re.IGNORECASE)
 
 
 def decouper_en_exercices(texte: str) -> dict:
     """Renvoie {numéro_exercice (str) : texte_du_bloc}. Si un même numéro
-    apparaît plusieurs fois (rare, mais possible avec du texte mal extrait),
-    les occurrences sont concaténées plutôt qu'écrasées."""
+    apparaît plusieurs fois, les occurrences sont concaténées plutôt
+    qu'écrasées."""
     positions = [(m.start(), m.group(1)) for m in MOTIF_EXERCICE.finditer(texte)]
     blocs: dict = {}
     for i, (debut, numero) in enumerate(positions):
@@ -101,17 +138,39 @@ def decouper_en_exercices(texte: str) -> dict:
 MOTIF_NOMBRE = r"[-−]?\d+(?:[.,]\d+)?"
 
 
+def extraire_arguments_commande(texte: str, commande: str) -> list:
+    """Extrait tous les arguments {...} d'une commande LaTeX donnée (ex.
+    "\\fbox"), en gérant les accolades imbriquées : une regex naïve du genre
+    r"\\fbox\\{(.*?)\\}" s'arrêterait à la première accolade fermante
+    rencontrée, qui peut appartenir à une sous-commande interne (par exemple
+    \\fbox{$A=\\dfrac{17}{12}$} contient déjà deux accolades internes)."""
+    resultats = []
+    for m in re.finditer(re.escape(commande) + r"\{", texte):
+        debut = m.end()
+        profondeur = 1
+        i = debut
+        while i < len(texte) and profondeur > 0:
+            if texte[i] == "{":
+                profondeur += 1
+            elif texte[i] == "}":
+                profondeur -= 1
+            i += 1
+        if profondeur == 0:
+            resultats.append(texte[debut:i - 1])
+    return resultats
+
+
 def extraire_reponse_courte(texte_corrige_exercice: str) -> str:
-    """Heuristique : cherche le dernier "= <nombre>" du corrigé (une
-    conclusion de calcul se termine presque toujours ainsi), et à défaut le
-    dernier nombre présent dans le texte. Renvoie UN SEUL nombre plutôt
-    qu'une phrase entière : si on gardait toute la phrase de conclusion (avec
-    ses calculs intermédiaires), le contrôle qualité de generate_from_annales.py
-    exigerait à tort que TOUS ces nombres intermédiaires réapparaissent dans
-    la conclusion du dialogue généré, ce qui rejetterait des dialogues
-    parfaitement corrects. Sur un exercice à plusieurs sous-questions, ne
-    capture que la conclusion de la DERNIÈRE sous-question (voir la remarque
-    en tête de fichier)."""
+    """Voir la documentation en tête de fichier pour l'ordre de préférence
+    (\\fbox, puis "= nombre", puis dernier nombre, puis dernière phrase).
+    Renvoie une chaîne courte plutôt qu'une phrase entière avec ses calculs
+    intermédiaires : sinon le contrôle qualité de generate_from_annales.py
+    exigerait à tort que TOUS les nombres intermédiaires de cette phrase
+    réapparaissent dans la conclusion du dialogue généré."""
+    boites = extraire_arguments_commande(texte_corrige_exercice, r"\fbox")
+    if boites:
+        return boites[-1].strip()
+
     matches_egal = list(re.finditer(r"=\s*(" + MOTIF_NOMBRE + r")", texte_corrige_exercice))
     if matches_egal:
         return matches_egal[-1].group(1)
@@ -145,9 +204,8 @@ MOTS_CLES_THEME = [(re.compile(motif, re.IGNORECASE), theme) for motif, theme in
 def deviner_theme(enonce: str) -> str:
     """Classification par mots-clés (avec limites de mot, pour éviter les faux
     positifs du type "aire" détecté dans "supplémentaires"), volontairement
-    simple et déterministe (pas d'appel à un modèle : le thème n'est qu'une
-    étiquette de tri, mais autant éviter tout risque inutile). Renvoie
-    "a_classifier" si rien ne correspond — à corriger à la main si besoin."""
+    simple et déterministe. Renvoie "a_classifier" si rien ne correspond — à
+    corriger à la main si besoin."""
     for motif, theme in MOTS_CLES_THEME:
         if motif.search(enonce):
             return theme
@@ -158,11 +216,23 @@ def deviner_theme(enonce: str) -> str:
 # 4. Association sujet / corrigé et construction du CSV
 # ---------------------------------------------------------------------------
 
+EXTENSIONS_SUPPORTEES = (".tex", ".pdf")
+
+
 def trouver_paires(dossier: Path) -> dict:
-    """Associe chaque <id>__sujet.pdf à son <id>__corrige.pdf (même dossier,
-    convention de nom imposée — voir l'en-tête de ce fichier)."""
-    sujets = {p.stem[:-len("__sujet")]: p for p in dossier.glob("*__sujet.pdf")}
-    corriges = {p.stem[:-len("__corrige")]: p for p in dossier.glob("*__corrige.pdf")}
+    """Associe chaque <id>__sujet.(tex|pdf) à son <id>__corrige.(tex|pdf)
+    (même dossier, convention de nom imposée — voir l'en-tête de ce fichier).
+    Le sujet et le corrigé d'une même session n'ont pas besoin d'être dans le
+    même format."""
+    def indexer(suffixe_nom: str) -> dict:
+        index = {}
+        for ext in EXTENSIONS_SUPPORTEES:
+            for p in dossier.glob(f"*{suffixe_nom}{ext}"):
+                index[p.name[: -len(suffixe_nom + ext)]] = p
+        return index
+
+    sujets = indexer("__sujet")
+    corriges = indexer("__corrige")
 
     paires = {}
     manquants = []
@@ -184,8 +254,8 @@ def trouver_paires(dossier: Path) -> dict:
 
 
 def construire_lignes(session_id: str, chemin_sujet: Path, chemin_corrige: Path) -> list:
-    texte_sujet = extraire_texte_pdf(chemin_sujet)
-    texte_corrige = extraire_texte_pdf(chemin_corrige)
+    texte_sujet = extraire_texte_fichier(chemin_sujet)
+    texte_corrige = extraire_texte_fichier(chemin_corrige)
 
     exercices_sujet = decouper_en_exercices(texte_sujet)
     exercices_corrige = decouper_en_exercices(texte_corrige)
@@ -213,7 +283,7 @@ def construire_lignes(session_id: str, chemin_sujet: Path, chemin_corrige: Path)
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--source", default="annales-source", help="Dossier contenant les PDF <id>__sujet.pdf / <id>__corrige.pdf")
+    parser.add_argument("--source", default="annales-source", help="Dossier contenant les fichiers <id>__sujet.(tex|pdf) / <id>__corrige.(tex|pdf)")
     parser.add_argument("--out", default="annales_apmep.csv", help="Fichier CSV de sortie")
     args = parser.parse_args()
 
@@ -224,13 +294,13 @@ def main():
     paires = trouver_paires(dossier)
     if not paires:
         sys.exit(
-            f"Aucune paire <id>__sujet.pdf / <id>__corrige.pdf trouvée dans {dossier}. "
+            f"Aucune paire <id>__sujet.(tex|pdf) / <id>__corrige.(tex|pdf) trouvée dans {dossier}. "
             "Vérifie la convention de nommage (voir l'en-tête de ce script)."
         )
 
     toutes_les_lignes = []
     for session_id, (chemin_sujet, chemin_corrige) in sorted(paires.items()):
-        print(f"[traitement] session {session_id}")
+        print(f"[traitement] session {session_id} ({chemin_sujet.suffix} / {chemin_corrige.suffix})")
         lignes = construire_lignes(session_id, chemin_sujet, chemin_corrige)
         toutes_les_lignes.extend(lignes)
         print(f"  -> {len(lignes)} exercice(s) extrait(s) avec réponse")
@@ -246,8 +316,7 @@ def main():
         writer.writerows(toutes_les_lignes)
 
     print(f"\nTerminé : {len(toutes_les_lignes)} exercices écrits dans {args.out}")
-    print("Relis un échantillon de 'reponse_correcte' à la main avant de lancer generate_from_annales.py :")
-    print("l'extraction est fiable sur des exercices simples, moins sur les exercices à tiroirs.")
+    print("Relis un échantillon de 'reponse_correcte' à la main avant de lancer generate_from_annales.py.")
 
 
 if __name__ == "__main__":
